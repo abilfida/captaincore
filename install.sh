@@ -325,66 +325,98 @@ fi
 # Prepare tag for asset name construction (remove 'v' prefix if present)
 TAG_FOR_ASSET=$(echo "$LATEST_TAG" | sed 's/^v//')
 
-ASSET_PATTERN_1="captaincore_${LATEST_TAG}_${OS_TYPE}_${BINARY_ARCH}"
-ASSET_PATTERN_2="captaincore_${TAG_FOR_ASSET}_${OS_TYPE}_${BINARY_ARCH}"
-ASSET_PATTERN_3="captaincore-${OS_TYPE}-${BINARY_ARCH}"
-ASSET_PATTERN_4="captaincore"
+# Define archive name patterns to search for.
+# Case variations for OS (Linux vs linux) might occur.
+# Pattern priority can be managed by the order in the jq query.
+ARCHIVE_PATTERN_1="captaincore_${LATEST_TAG}_${OS_TYPE^}_${BINARY_ARCH}.tar.gz"  # e.g., captaincore_v0.13.0_Linux_amd64.tar.gz
+ARCHIVE_PATTERN_2="captaincore_${TAG_FOR_ASSET}_${OS_TYPE^}_${BINARY_ARCH}.tar.gz" # e.g., captaincore_0.13.0_Linux_amd64.tar.gz
+ARCHIVE_PATTERN_3="captaincore_${LATEST_TAG}_${OS_TYPE}_${BINARY_ARCH}.tar.gz"    # e.g., captaincore_v0.13.0_linux_amd64.tar.gz
+ARCHIVE_PATTERN_4="captaincore_${TAG_FOR_ASSET}_${OS_TYPE}_${BINARY_ARCH}.tar.gz"  # e.g., captaincore_0.13.0_linux_amd64.tar.gz
+# Fallback for simpler names if version is not in the filename (less common for archives but possible)
+ARCHIVE_PATTERN_5="captaincore-\${OS_TYPE^}-\${BINARY_ARCH}.tar.gz"                 # e.g., captaincore-Linux-amd64.tar.gz
+ARCHIVE_PATTERN_6="captaincore-\${OS_TYPE}-\${BINARY_ARCH}.tar.gz"                   # e.g., captaincore-linux-amd64.tar.gz
 
-log_info "Attempting to find download URL for binary asset..."
-log_info "Searching for assets like: ${ASSET_PATTERN_1}, ${ASSET_PATTERN_2}, ${ASSET_PATTERN_3}, or ${ASSET_PATTERN_4}"
 
-DOWNLOAD_URL=$(echo "$LATEST_RELEASE_JSON" | jq -r --arg p1 "$ASSET_PATTERN_1" --arg p2 "$ASSET_PATTERN_2" --arg p3 "$ASSET_PATTERN_3" --arg p4 "$ASSET_PATTERN_4" '
+log_info "Attempting to find download URL for archive asset..."
+log_info "Searching for archives like: ${ARCHIVE_PATTERN_1}, ${ARCHIVE_PATTERN_2}, etc."
+
+DOWNLOAD_URL=$(echo "$LATEST_RELEASE_JSON" | jq -r --arg p1 "$ARCHIVE_PATTERN_1" \
+                                                          --arg p2 "$ARCHIVE_PATTERN_2" \
+                                                          --arg p3 "$ARCHIVE_PATTERN_3" \
+                                                          --arg p4 "$ARCHIVE_PATTERN_4" \
+                                                          --arg p5 "$ARCHIVE_PATTERN_5" \
+                                                          --arg p6 "$ARCHIVE_PATTERN_6" '
     .assets[] |
-    select(.name == $p1 or .name == $p2 or .name == $p3 or .name == $p4) |
+    select(.name == $p1 or .name == $p2 or .name == $p3 or .name == $p4 or .name == $p5 or .name == $p6) |
     .browser_download_url' | head -n 1)
 
 if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-    log_error "Could not find a matching binary asset in the release for patterns:"
-    log_error "  ${ASSET_PATTERN_1}, ${ASSET_PATTERN_2}, ${ASSET_PATTERN_3}, ${ASSET_PATTERN_4}"
-    log_info  "Available assets in the release:"
-    echo "$LATEST_RELEASE_JSON" | jq -r '.assets[].name' | sed 's/^/    - /'
-    log_info  "If CaptainCore is distributed in an archive (e.g., .tar.gz), this script needs to be updated to handle extraction."
-    log_error "Exiting as a suitable binary download URL could not be determined automatically."
+    log_error "Could not find a matching TAR.GZ archive asset in the release for patterns:"
+    log_error "  Tried patterns like: captaincore_VERSION_OS_ARCH.tar.gz, captaincore-OS-ARCH.tar.gz etc."
+    log_info  "Available assets in the release (looking for .tar.gz):"
+    echo "$LATEST_RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .name' | sed 's/^/    - /'
+    log_error "Exiting as a suitable archive download URL could not be determined automatically."
     exit 1
 else
-    log_info "Found download URL (via jq): $DOWNLOAD_URL"
+    log_info "Found archive download URL (via jq): $DOWNLOAD_URL"
 fi
 
-log_info "Downloading CaptainCore binary for $OS_TYPE $BINARY_ARCH from $DOWNLOAD_URL..."
-TMP_CAPTAINCORE_BINARY="/tmp/captaincore_download"
-rm -f "$TMP_CAPTAINCORE_BINARY" # Clean up previous attempt
+log_info "Downloading CaptainCore archive for $OS_TYPE $BINARY_ARCH from $DOWNLOAD_URL..."
+TMP_CAPTAINCORE_ARCHIVE="/tmp/captaincore_archive.tar.gz" # Changed name to reflect it's an archive
+rm -f "$TMP_CAPTAINCORE_ARCHIVE"
 
-# Use curl with -L to follow redirects, which is common for 'latest' release links
-if curl -L -o "$TMP_CAPTAINCORE_BINARY" "$DOWNLOAD_URL"; then
-    log_info "CaptainCore binary downloaded successfully to $TMP_CAPTAINCORE_BINARY."
+if curl -L -o "$TMP_CAPTAINCORE_ARCHIVE" "$DOWNLOAD_URL"; then
+    log_info "CaptainCore archive downloaded successfully to $TMP_CAPTAINCORE_ARCHIVE."
 else
-    log_error "Failed to download CaptainCore binary. Tried URL: $DOWNLOAD_URL"
-    log_error "Please check the CaptainCore GitHub releases page (https://github.com/${CAPTAINCORE_REPO}/releases) for the correct binary name and URL."
+    log_error "Failed to download CaptainCore archive. Tried URL: $DOWNLOAD_URL"
+    log_error "Please check the CaptainCore GitHub releases page (https://github.com/${CAPTAINCORE_REPO}/releases)."
     exit 1
 fi
 
-log_info "Making CaptainCore binary executable..."
-chmod +x "$TMP_CAPTAINCORE_BINARY"
-
-log_info "Moving CaptainCore binary to $CAPTAINCORE_INSTALL_PATH..."
-if [ -f "$CAPTAINCORE_INSTALL_PATH" ]; then
-    log_info "Removing existing file at $CAPTAINCORE_INSTALL_PATH."
-    rm -f "$CAPTAINCORE_INSTALL_PATH"
-fi
-if mv "$TMP_CAPTAINCORE_BINARY" "$CAPTAINCORE_INSTALL_PATH"; then
-    log_info "CaptainCore binary installed successfully to $CAPTAINCORE_INSTALL_PATH."
-    # Verify by running a command, e.g., captaincore version
-    if "$CAPTAINCORE_INSTALL_PATH" version &> /dev/null; then # Assuming 'captaincore version' is a valid command
-        log_info "CaptainCore version: $($CAPTAINCORE_INSTALL_PATH version)"
+log_info "Extracting CaptainCore binary from archive..."
+# Extract to a temporary directory, find the binary, then move it.
+TMP_EXTRACT_DIR="/tmp/captaincore_extract"
+rm -rf "$TMP_EXTRACT_DIR"
+mkdir -p "$TMP_EXTRACT_DIR"
+if tar -xzf "$TMP_CAPTAINCORE_ARCHIVE" -C "$TMP_EXTRACT_DIR"; then
+    log_info "Archive extracted to $TMP_EXTRACT_DIR."
+    # Try to find the binary. It's often named 'captaincore'.
+    # If it's in a subdirectory (e.g. a bin folder or folder named after release), adjust find.
+    # For now, assume it's in the root of the tarball or a common subdir.
+    FOUND_BINARY=$(find "$TMP_EXTRACT_DIR" -name captaincore -type f | head -n 1)
+    if [ -n "$FOUND_BINARY" ]; then
+        log_info "Found CaptainCore binary in archive at: $FOUND_BINARY"
+        chmod +x "$FOUND_BINARY"
+        log_info "Moving CaptainCore binary to $CAPTAINCORE_INSTALL_PATH..."
+        if [ -f "$CAPTAINCORE_INSTALL_PATH" ]; then
+            log_info "Removing existing file at $CAPTAINCORE_INSTALL_PATH."
+            rm -f "$CAPTAINCORE_INSTALL_PATH"
+        fi
+        if mv "$FOUND_BINARY" "$CAPTAINCORE_INSTALL_PATH"; then
+            log_info "CaptainCore binary installed successfully to $CAPTAINCORE_INSTALL_PATH."
+            if "$CAPTAINCORE_INSTALL_PATH" version &> /dev/null; then
+                log_info "CaptainCore version: $($CAPTAINCORE_INSTALL_PATH version)"
+            else
+                log_info "Could not execute '$CAPTAINCORE_INSTALL_PATH version'. Verify the binary."
+            fi
+        else
+            log_error "Failed to move CaptainCore binary from $FOUND_BINARY to $CAPTAINCORE_INSTALL_PATH."
+            exit 1
+        fi
     else
-        log_info "Could not execute '$CAPTAINCORE_INSTALL_PATH version'. The binary might be corrupted or not a CaptainCore binary."
-        log_info "If it requires subcommands, try '$CAPTAINCORE_INSTALL_PATH help' or similar."
+        log_error "Could not find 'captaincore' binary within the extracted archive at $TMP_EXTRACT_DIR."
+        log_info "Contents of archive:"
+        find "$TMP_EXTRACT_DIR" -ls
+        exit 1
     fi
 else
-    log_error "Failed to move CaptainCore binary to $CAPTAINCORE_INSTALL_PATH."
-    log_error "Please check permissions for $CAPTAINCORE_INSTALL_PATH."
+    log_error "Failed to extract CaptainCore archive from $TMP_CAPTAINCORE_ARCHIVE."
     exit 1
 fi
+
+# Clean up
+rm -f "$TMP_CAPTAINCORE_ARCHIVE"
+rm -rf "$TMP_EXTRACT_DIR"
 
 log_info "=== Phase 3 (Git and CaptainCore Binary Installation) Complete ==="
 echo
@@ -431,7 +463,7 @@ log_info "- Checked/Installed Go (Golang)"
 log_info "- Checked/Installed WP-CLI"
 log_info "- Checked/Installed Git"
 log_info "- Checked/Installed jq"
-log_info "- Checked/Installed CaptainCore binary (using jq for GitHub API parsing)"
+log_info "- Checked/Installed CaptainCore binary (using jq for GitHub API parsing, from .tar.gz)"
 log_info "- PATH configuration for Go was set up in ${GO_PROFILE_SCRIPT}"
 echo
 log_info "IMPORTANT:"
