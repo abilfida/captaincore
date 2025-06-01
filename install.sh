@@ -17,6 +17,7 @@ log_warning() {
 }
 
 # --- Configuration ---
+export DEBIAN_FRONTEND=noninteractive
 MIN_GO_VERSION_MAJOR=1
 MIN_GO_VERSION_MINOR=18
 GO_INSTALL_DIR="/usr/local/go"
@@ -230,11 +231,25 @@ if command -v jq &> /dev/null; then
     log_info "jq is already installed."
 else
     log_info "Installing jq..."
-    if apt-get update && apt-get install -y jq; then
-        log_info "jq installed successfully."
+    log_info "Running apt-get update..."
+    if apt-get update; then
+        log_info "apt-get update completed successfully."
+        log_info "Attempting to install jq..."
+        if apt-get install -y jq; then
+            log_info "jq installed successfully."
+        else
+            JQ_INSTALL_EXIT_CODE=$?
+            log_error "Command 'apt-get install -y jq' failed with exit code: $JQ_INSTALL_EXIT_CODE."
+            log_error "jq is required for parsing GitHub API responses reliably."
+            log_error "Check your network connection. More details may be in /var/log/apt/term.log or by running the command manually."
+            exit 1
+        fi
     else
-        log_error "Failed to install jq. This is required for parsing GitHub API responses reliably. Please install jq and try again."
-        exit 1 # jq is critical for the improved logic
+        APT_UPDATE_EXIT_CODE=$?
+        log_error "Command 'apt-get update' failed with exit code: $APT_UPDATE_EXIT_CODE."
+        log_error "This prevented the script from attempting to install jq."
+        log_error "Check your network and apt package sources (e.g., /etc/apt/sources.list). More details may be in /var/log/apt/term.log or by running the command manually."
+        exit 1
     fi
 fi
 
