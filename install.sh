@@ -88,14 +88,14 @@ if [ "$GO_VERSION_OK" = false ]; then
 
     # Using a fixed recent version for robustness in this script for now
     DESIRED_GO_VERSION="1.21.6" # Check https://go.dev/dl/ for latest stable
-    ARCH=$(uname -m)
+    ARCH_UNAME=$(uname -m) # Renamed to ARCH_UNAME to avoid conflict with BINARY_ARCH logic later
     GO_ARCH="amd64" # Default
-    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+    if [ "$ARCH_UNAME" = "aarch64" ] || [ "$ARCH_UNAME" = "arm64" ]; then
         GO_ARCH="arm64"
-    elif [ "$ARCH" = "x86_64" ]; then
+    elif [ "$ARCH_UNAME" = "x86_64" ]; then
         GO_ARCH="amd64"
     else
-        log_error "Unsupported architecture: $ARCH. Cannot automatically install Go."
+        log_error "Unsupported architecture: $ARCH_UNAME. Cannot automatically install Go."
         exit 1
     fi
 
@@ -168,9 +168,9 @@ WPCLI_INSTALL_PATH="/usr/local/bin/wp"
 if command -v wp &> /dev/null; then
     # Check if it's the actual WP-CLI and not some other 'wp' alias or script
     # A simple check could be 'wp --info' which should return 0
-    if wp --info &> /dev/null; then
+    if wp --allow-root --info &> /dev/null; then
         log_info "WP-CLI is already installed at $(command -v wp)."
-        log_info "WP-CLI version: $(wp cli version --quiet)" # Using --quiet to avoid potential non-zero exit on some setups if only version is needed
+        log_info "WP-CLI version: $(wp --allow-root cli version --quiet)" # Using --quiet to avoid potential non-zero exit on some setups if only version is needed
     else
         log_info "A command 'wp' exists but doesn't seem to be WP-CLI. Proceeding with installation."
         install_wp_cli=true
@@ -208,7 +208,7 @@ if [ "$install_wp_cli" = true ]; then
     fi
     if mv "/tmp/wp-cli.phar" "$WPCLI_INSTALL_PATH"; then
         log_info "WP-CLI installed successfully to $WPCLI_INSTALL_PATH."
-        log_info "WP-CLI version: $(wp cli version --quiet || echo 'unknown')"
+        log_info "WP-CLI version: $(wp --allow-root cli version --quiet || echo 'unknown')"
     else
         log_error "Failed to move wp-cli.phar to $WPCLI_INSTALL_PATH."
         log_error "Please check permissions for $WPCLI_INSTALL_PATH."
@@ -225,6 +225,19 @@ echo
 # --- Phase 3: Git Installation and CaptainCore Binary Installation ---
 log_info "=== Starting Phase 3: Git and CaptainCore Binary Installation ==="
 
+# Install jq for robust JSON parsing
+if command -v jq &> /dev/null; then
+    log_info "jq is already installed."
+else
+    log_info "Installing jq..."
+    if apt-get update && apt-get install -y jq; then
+        log_info "jq installed successfully."
+    else
+        log_error "Failed to install jq. This is required for parsing GitHub API responses reliably. Please install jq and try again."
+        exit 1 # jq is critical for the improved logic
+    fi
+fi
+
 # 1. Install Git (useful utility, and fallback for source compilation if ever needed)
 if command -v git &> /dev/null; then
     log_info "Git is already installed. Version: $(git --version)"
@@ -240,90 +253,87 @@ fi
 
 # 2. CaptainCore Binary Installation (from GitHub Releases)
 CAPTAINCORE_INSTALL_PATH="/usr/local/bin/captaincore"
-# These should be updated if the repository name or release asset naming changes.
-CAPTAINCORE_REPO="CaptainCore/captaincore" # Assuming this is the GitHub repo path
-# To get the latest release tag:
-# LATEST_TAG=$(curl -s "https://api.github.com/repos/${CAPTAINCORE_REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*//')
-# For now, using a placeholder or assuming 'latest'. If a specific version is needed, set it here.
-# If using 'latest', the download URL might redirect.
-# The actual asset name might include the version and OS/arch.
-# e.g., captaincore_0.5.0_linux_amd64
+CAPTAINCORE_REPO="CaptainCore/captaincore"
 
-# Let's try to get the latest release tag
+# Let's try to get the latest release tag using jq
 LATEST_TAG=""
-log_info "Fetching latest release tag from GitHub API for $CAPTAINCORE_REPO..."
-LATEST_TAG_JSON=$(curl -s "https://api.github.com/repos/${CAPTAINCORE_REPO}/releases/latest")
+DOWNLOAD_URL="" # Ensure DOWNLOAD_URL is also reset here
 
-if echo "$LATEST_TAG_JSON" | grep -q '"tag_name":'; then
-    LATEST_TAG=$(echo "$LATEST_TAG_JSON" | grep '"tag_name":' | sed -E 's/.*"tag_name": *"([^"]+)".*//')
-    log_info "Latest release tag: $LATEST_TAG"
-else
-    log_error "Could not fetch latest release tag from GitHub API. Response was:"
-    log_error "$LATEST_TAG_JSON"
-    log_info "Proceeding with a generic 'latest' download URL, which might not always point to the newest binary or might fail."
-    LATEST_TAG="latest" # Fallback, but direct download might be tricky without asset name.
-fi
+log_info "Fetching latest release information from GitHub API for ${CAPTAINCORE_REPO}..."
+# Store the full JSON response for debugging and parsing
+LATEST_RELEASE_JSON=$(curl --connect-timeout 10 -s "https://api.github.com/repos/${CAPTAINCORE_REPO}/releases/latest")
 
+# Log the raw JSON response for debugging (or a part of it)
+log_info "GitHub API Response (first 500 chars for brevity): $(echo "$LATEST_RELEASE_JSON" | cut -c 1-500)"
 
-ARCH=$(uname -m)
-OS_TYPE="linux" # Assuming Linux, as per earlier checks
-BINARY_ARCH="amd64" # Default
-
-if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-    BINARY_ARCH="arm64"
-elif [ "$ARCH" = "x86_64" ]; then
-    BINARY_ARCH="amd64"
-else
-    log_error "Unsupported architecture: $ARCH for CaptainCore binary download."
-    log_info "You may need to compile from source or find a compatible binary manually."
+if [ -z "$LATEST_RELEASE_JSON" ]; then
+    log_error "Failed to fetch release data from GitHub API (empty response). Check network connectivity or API status."
     exit 1
 fi
 
-# Construct the binary name - this is an assumption based on common GoReleaser patterns.
-# Example: captaincore_1.2.3_linux_amd64
-# If LATEST_TAG is "latest", this might not be the actual filename.
-# A more robust way is to parse the assets list from the GitHub API JSON.
-# For now, we'll try a common pattern. If goreleaser uses a simpler name like 'captaincore-linux-amd64', adjust this.
-# Let's assume the binary name does NOT include the version for 'latest' direct download, or that goreleaser names it consistently.
-# A common pattern for direct download without version in name might be: captaincore_linux_amd64
-# Or, if the version IS in the name, the LATEST_TAG must be a proper version like v1.2.3
-
-# Attempting to find a direct asset download URL from the GitHub API JSON
-DOWNLOAD_URL=""
-ASSET_NAME_PATTERN="captaincore_${OS_TYPE}_${BINARY_ARCH}" # Basic pattern
-VERSIONED_ASSET_NAME_PATTERN="captaincore_$(echo "$LATEST_TAG" | sed 's/^v//')_${OS_TYPE}_${BINARY_ARCH}" # Pattern with version
-
-if [ "$LATEST_TAG" != "latest" ] && echo "$LATEST_TAG_JSON" | grep -q '"browser_download_url":'; then
-    # Try to find asset URL that matches the pattern
-    DOWNLOAD_URL=$(echo "$LATEST_TAG_JSON" | grep '"browser_download_url":' | grep -i "$VERSIONED_ASSET_NAME_PATTERN" | sed -E 's/.*"browser_download_url": *"([^"]+)".*//' | head -n 1)
-    if [ -z "$DOWNLOAD_URL" ]; then
-         # Fallback to a simpler name if the versioned one isn't found (older goreleaser configs?)
-         DOWNLOAD_URL=$(echo "$LATEST_TAG_JSON" | grep '"browser_download_url":' | grep -i "$ASSET_NAME_PATTERN" | sed -E 's/.*"browser_download_url": *"([^"]+)".*//' | head -n 1)
+# Check if the response indicates an API error or 'Not Found'
+if echo "$LATEST_RELEASE_JSON" | jq -e '.message' &>/dev/null; then
+    API_ERROR_MESSAGE=$(echo "$LATEST_RELEASE_JSON" | jq -r '.message')
+    log_error "GitHub API error: ${API_ERROR_MESSAGE}"
+    if [ "${API_ERROR_MESSAGE}" = "Not Found" ]; then
+        log_error "No releases found for repository ${CAPTAINCORE_REPO}. Please check the repository.";
     fi
+    exit 1
 fi
 
-if [ -z "$DOWNLOAD_URL" ]; then
-    log_info "Could not determine specific asset download URL from GitHub API. Falling back to generic URL structure."
-    # This structure assumes the repo uses GitHub Releases and assets are named predictably.
-    # This might need adjustment based on actual release asset naming.
-    # If LATEST_TAG is 'latest', this URL might be:
-    # https://github.com/CaptainCore/captaincore/releases/latest/download/captaincore_linux_amd64
-    # If LATEST_TAG is 'vX.Y.Z', this URL might be:
-    # https://github.com/CaptainCore/captaincore/releases/download/vX.Y.Z/captaincore_X.Y.Z_linux_amd64
-    # The GoReleaser config (.goreleaser.yml) would define the actual asset names.
-    # Let's assume a common GoReleaser pattern where the version is part of the archive but maybe not the binary inside,
-    # or the binary itself is named like 'captaincore_linux_amd64'.
-    # This part is highly dependent on the actual release asset naming.
-    # A common pattern for a direct binary (not archive) might be:
-    RELEASE_ASSET_NAME="captaincore-${OS_TYPE}-${BINARY_ARCH}" # Common for direct binary
-    if [ "$LATEST_TAG" = "latest" ]; then
-        DOWNLOAD_URL="https://github.com/${CAPTAINCORE_REPO}/releases/latest/download/${RELEASE_ASSET_NAME}"
-    else
-        DOWNLOAD_URL="https://github.com/${CAPTAINCORE_REPO}/releases/download/${LATEST_TAG}/${RELEASE_ASSET_NAME}"
-    fi
-    log_info "Using fallback download URL: $DOWNLOAD_URL (This is a guess based on common patterns)"
+LATEST_TAG=$(echo "$LATEST_RELEASE_JSON" | jq -r '.tag_name // empty')
+
+if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+    log_error "Could not extract 'tag_name' from GitHub API response using jq."
+    log_info "Consider checking the structure of the JSON response if releases exist:"
+    log_info "$(echo "$LATEST_RELEASE_JSON" | jq . | head -n 20)" # Print formatted JSON head
+    LATEST_TAG="latest" # Fallback to generic 'latest' if tag parsing fails
+    log_warning "Falling back to using 'latest' as tag. This might not be reliable for asset name construction."
+else
+    log_info "Latest release tag (via jq): $LATEST_TAG"
 fi
 
+# Determine architecture
+CURRENT_ARCH=$(uname -m) # Renamed from ARCH to CURRENT_ARCH
+OS_TYPE="linux"
+BINARY_ARCH="amd64"
+
+if [ "$CURRENT_ARCH" = "aarch64" ] || [ "$CURRENT_ARCH" = "arm64" ]; then
+    BINARY_ARCH="arm64"
+elif [ "$CURRENT_ARCH" = "x86_64" ]; then
+    BINARY_ARCH="amd64"
+else
+    log_error "Unsupported architecture: $CURRENT_ARCH for CaptainCore binary download."
+    exit 1
+fi
+
+# Prepare tag for asset name construction (remove 'v' prefix if present)
+TAG_FOR_ASSET=$(echo "$LATEST_TAG" | sed 's/^v//')
+
+ASSET_PATTERN_1="captaincore_${LATEST_TAG}_${OS_TYPE}_${BINARY_ARCH}"
+ASSET_PATTERN_2="captaincore_${TAG_FOR_ASSET}_${OS_TYPE}_${BINARY_ARCH}"
+ASSET_PATTERN_3="captaincore-${OS_TYPE}-${BINARY_ARCH}"
+ASSET_PATTERN_4="captaincore"
+
+log_info "Attempting to find download URL for binary asset..."
+log_info "Searching for assets like: ${ASSET_PATTERN_1}, ${ASSET_PATTERN_2}, ${ASSET_PATTERN_3}, or ${ASSET_PATTERN_4}"
+
+DOWNLOAD_URL=$(echo "$LATEST_RELEASE_JSON" | jq -r --arg p1 "$ASSET_PATTERN_1" --arg p2 "$ASSET_PATTERN_2" --arg p3 "$ASSET_PATTERN_3" --arg p4 "$ASSET_PATTERN_4" '
+    .assets[] |
+    select(.name == $p1 or .name == $p2 or .name == $p3 or .name == $p4) |
+    .browser_download_url' | head -n 1)
+
+if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+    log_error "Could not find a matching binary asset in the release for patterns:"
+    log_error "  ${ASSET_PATTERN_1}, ${ASSET_PATTERN_2}, ${ASSET_PATTERN_3}, ${ASSET_PATTERN_4}"
+    log_info  "Available assets in the release:"
+    echo "$LATEST_RELEASE_JSON" | jq -r '.assets[].name' | sed 's/^/    - /'
+    log_info  "If CaptainCore is distributed in an archive (e.g., .tar.gz), this script needs to be updated to handle extraction."
+    log_error "Exiting as a suitable binary download URL could not be determined automatically."
+    exit 1
+else
+    log_info "Found download URL (via jq): $DOWNLOAD_URL"
+fi
 
 log_info "Downloading CaptainCore binary for $OS_TYPE $BINARY_ARCH from $DOWNLOAD_URL..."
 TMP_CAPTAINCORE_BINARY="/tmp/captaincore_download"
@@ -335,7 +345,6 @@ if curl -L -o "$TMP_CAPTAINCORE_BINARY" "$DOWNLOAD_URL"; then
 else
     log_error "Failed to download CaptainCore binary. Tried URL: $DOWNLOAD_URL"
     log_error "Please check the CaptainCore GitHub releases page (https://github.com/${CAPTAINCORE_REPO}/releases) for the correct binary name and URL."
-    log_error "If the binary name pattern (e.g., ${RELEASE_ASSET_NAME} or ${VERSIONED_ASSET_NAME_PATTERN}) is incorrect, this script needs adjustment."
     exit 1
 fi
 
@@ -381,8 +390,8 @@ else
     log_warning "Go command (go) not immediately found in PATH. A new shell session or 'source ${GO_PROFILE_SCRIPT}' may be needed."
 fi
 
-if command -v wp &> /dev/null && wp --info &> /dev/null; then
-    log_info "WP-CLI installation seems successful. Current version: $(wp cli version --quiet)"
+if command -v wp &> /dev/null && wp --allow-root --info &> /dev/null; then
+    log_info "WP-CLI installation seems successful. Current version: $(wp --allow-root cli version --quiet)"
 else
     log_warning "WP-CLI command (wp) not immediately found or not functioning. A new shell session may be needed."
 fi
@@ -406,11 +415,12 @@ log_info "Summary of actions:"
 log_info "- Checked/Installed Go (Golang)"
 log_info "- Checked/Installed WP-CLI"
 log_info "- Checked/Installed Git"
-log_info "- Checked/Installed CaptainCore binary"
+log_info "- Checked/Installed jq"
+log_info "- Checked/Installed CaptainCore binary (using jq for GitHub API parsing)"
 log_info "- PATH configuration for Go was set up in ${GO_PROFILE_SCRIPT}"
 echo
 log_info "IMPORTANT:"
-log_info "To ensure all installed tools (Go, WP-CLI, CaptainCore) are available in your"
+log_info "To ensure all installed tools (Go, WP-CLI, CaptainCore, jq) are available in your"
 log_info "current terminal session, you may need to source your profile file or"
 log_info "open a new terminal session."
 log_info "Example for bash (if you updated .bashrc or for /etc/profile.d scripts):"
