@@ -2,6 +2,17 @@
 
 This guide outlines the steps required to set up CaptainCore on a server.
 
+## Automated Setup Script
+
+For a quicker, automated setup on a fresh Ubuntu server, you can use the `setup.sh` script available in the root of this repository. This script attempts to perform most of the steps detailed below.
+
+To use it:
+1. Download or clone the repository.
+2. Navigate to the repository directory.
+3. Run the script with sudo: `sudo ./setup.sh`
+
+It is still recommended to read through this manual guide to understand the components and configuration involved.
+
 ## 1. Prerequisites
 
 Before you begin, ensure you have the following:
