@@ -309,14 +309,13 @@ else
 fi
 
 # Determine architecture
-CURRENT_ARCH=$(uname -m) # Renamed from ARCH to CURRENT_ARCH
+CURRENT_ARCH=$(uname -m)
 OS_TYPE="linux"
-BINARY_ARCH="amd64"
-
+# Set BINARY_ARCH based on uname -m for direct use in asset names
 if [ "$CURRENT_ARCH" = "aarch64" ] || [ "$CURRENT_ARCH" = "arm64" ]; then
     BINARY_ARCH="arm64"
 elif [ "$CURRENT_ARCH" = "x86_64" ]; then
-    BINARY_ARCH="amd64"
+    BINARY_ARCH="x86_64" # Changed from "amd64"
 else
     log_error "Unsupported architecture: $CURRENT_ARCH for CaptainCore binary download."
     exit 1
